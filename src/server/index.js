@@ -1,15 +1,20 @@
 require('dotenv').config({ path: '.env.local' });
+
 import express from 'express';
 const cors = require('cors');
 const graphqlHTTP = require('express-graphql');
 const gql = require('graphql-tag');
 const { buildASTSchema } = require('graphql');
 
-const POSTS = [
-  { author: "John Doe", body: "Hello world" },
-  { author: "Jane Doe", body: "Hi, planet!" },
-];
+const AUTHORS = {
+  1: { id: 1, name: "John Doe" },
+  2: { id: 2, name: "Jane Doe" },
+};
 
+const POSTS = [
+  { authorId: 1, body: "Hello world" },
+  { authorId: 2, body: "Hi, planet!" },
+];
 const schema = buildASTSchema(gql`
   type Query {
     posts: [Post]
@@ -31,6 +36,11 @@ const schema = buildASTSchema(gql`
      author: String!
      body: String!
   }
+  
+  type Author {
+    id: ID
+    name: String
+  }
 `);
 
 const mapPost = (post, id) => post && ({ id, ...post });
@@ -38,8 +48,11 @@ const mapPost = (post, id) => post && ({ id, ...post });
 const root = {
   posts: () => POSTS.map(mapPost),
   post: ({ id }) => mapPost(POSTS[id], id),
-  submitPost: ({ input: { id, author, body } }) => {
-    const post = { author, body };
+  submitPost: async ({ input: { id, body } }, { headers }) => {
+    const authorId = await getUserId(headers);
+    if (!authorId) return null;
+
+    const post = { authorId, body };
     let index = POSTS.length;
 
     if (id != null && id >= 0 && id < POSTS.length) {
@@ -63,6 +76,45 @@ app.use('/graphql', graphqlHTTP({
   graphiql: true,
 }));
 
-const port = process.env.PORT || 4000
+const port = process.env.PORT || 4000;
 app.listen(port);
 console.log(`Running a GraphQL API server at localhost:${port}/graphql`);
+
+const { Client } = require('@okta/okta-sdk-nodejs');
+const OktaJwtVerifier = require('@okta/jwt-verifier');
+
+const oktaJwtVerifier = new OktaJwtVerifier({
+  clientId: process.env.REACT_APP_OKTA_CLIENT_ID,
+  issuer: `${process.env.REACT_APP_OKTA_ORG_URL}/oauth2/default`,
+});
+
+const client = new Client({
+  orgUrl: process.env.REACT_APP_OKTA_ORG_URL,
+  token: process.env.REACT_APP_OKTA_TOKEN,
+});
+
+const mapPost = (post, id) => post && ({
+  ...post,
+  id,
+  author: AUTHORS[post.authorId],
+});
+
+const getUserId = async ({ authorization }) => {
+  try {
+    const accessToken = authorization.trim().split(' ')[1];
+    const { claims: { uid } } = await oktaJwtVerifier.verifyAccessToken(accessToken);
+
+    if (!AUTHORS[uid]) {
+      const { profile: { firstName, lastName } } = await client.getUser(uid);
+
+      AUTHORS[uid] = {
+        id: uid,
+        name: [firstName, lastName].filter(Boolean).join(' '),
+      };
+    }
+
+    return uid;
+  } catch (error) {
+    return null;
+  }
+};
